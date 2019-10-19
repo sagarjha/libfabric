@@ -55,6 +55,7 @@
 #include <complex.h>
 #include <arpa/inet.h>
 #include <net/if.h>
+#include <sys/syscall.h>
 
 #include <ofi_mem.h>
 #include "sock.h"
@@ -2366,24 +2367,38 @@ static int sock_pe_progress_rx_ep(struct sock_pe *pe,
 		}
 	}
 
-	num_fds = fi_epoll_wait(map->epoll_set, map->epoll_ctxs,
-	                        MIN(map->used, map->epoll_ctxs_sz), 0);
-	if (num_fds < 0 || num_fds == 0) {
-		if (num_fds < 0)
-			SOCK_LOG_ERROR("epoll failed: %d\n", num_fds);
-		return num_fds;
+	static __thread struct timespec last_time, cur_time;
+	static __thread int init = 0;
+	if (init == 0) {
+	  clock_gettime(CLOCK_REALTIME, &last_time);
+	  init = 1;
 	}
-
+	num_fds = fi_epoll_wait(map->epoll_set, map->epoll_ctxs,
+				MIN(map->used, map->epoll_ctxs_sz), 0);
+	if (num_fds < 0 || num_fds == 0) {
+	  if (num_fds < 0)
+	    SOCK_LOG_ERROR("epoll failed: %d\n", num_fds);
+	  if (num_fds == 0) {
+	    clock_gettime(CLOCK_REALTIME, &cur_time);
+	    double time_elapsed_in_ms = (cur_time.tv_sec - last_time.tv_sec) * 1e3
+	      + (cur_time.tv_nsec - last_time.tv_nsec) / 1e6;
+	    if(time_elapsed_in_ms > 1) {
+	      usleep(1000);
+	    }
+	  }
+	  return num_fds;
+	}
+	clock_gettime(CLOCK_REALTIME, &last_time);
 	fastlock_acquire(&map->lock);
 	for (i = 0; i < num_fds; i++) {
-		conn = map->epoll_ctxs[i];
-		if (!conn)
-			SOCK_LOG_ERROR("ofi_idm_lookup failed\n");
+	  conn = map->epoll_ctxs[i];
+	  if (!conn)
+	    SOCK_LOG_ERROR("ofi_idm_lookup failed\n");
 
-		if (!conn || conn->rx_pe_entry)
-			continue;
+	  if (!conn || conn->rx_pe_entry)
+	    continue;
 
-		sock_pe_new_rx_entry(pe, rx_ctx, ep_attr, conn);
+	  sock_pe_new_rx_entry(pe, rx_ctx, ep_attr, conn);
 	}
 	fastlock_release(&map->lock);
 
